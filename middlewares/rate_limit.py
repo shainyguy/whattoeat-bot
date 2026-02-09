@@ -1,35 +1,33 @@
-# middlewares/rate_limit.py
 from typing import Callable, Dict, Any, Awaitable
+
 from aiogram import BaseMiddleware
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, TelegramObject
 
 from database import UserDB
-from config import config
 
 
 class RateLimitMiddleware(BaseMiddleware):
-    """Middleware для проверки лимитов free-пользователей"""
+    """Middleware — загружает пользователя из БД и передаёт в хэндлеры"""
 
     async def __call__(
         self,
-        handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
-        event: Message | CallbackQuery,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        # Получаем telegram_id
-        if isinstance(event, Message):
-            telegram_id = event.from_user.id
-        elif isinstance(event, CallbackQuery):
-            telegram_id = event.from_user.id
-        else:
-            return await handler(event, data)
+        # Получаем user из event
+        user = None
+        if isinstance(event, Message) and event.from_user:
+            user = event.from_user
+        elif isinstance(event, CallbackQuery) and event.from_user:
+            user = event.from_user
 
-        # Загружаем пользователя и передаём в data
-        user = await UserDB.get_or_create(
-            telegram_id=telegram_id,
-            username=event.from_user.username,
-            full_name=event.from_user.full_name
-        )
-        data["db_user"] = user
+        if user:
+            db_user = await UserDB.get_or_create(
+                telegram_id=user.id,
+                username=user.username,
+                full_name=user.full_name
+            )
+            data["db_user"] = db_user
 
         return await handler(event, data)
