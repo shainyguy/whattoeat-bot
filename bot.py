@@ -14,20 +14,18 @@ from config import config
 from database import init_db, UserDB
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # <── ИЗМЕНЕНО НА DEBUG
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
 
-# ─── Webhook ЮKassa ───
 async def yukassa_webhook_handler(request: web.Request) -> web.Response:
     try:
         from payment_service import payment_service
         event_json = await request.json()
         logger.info(f"YooKassa webhook: {event_json.get('event', 'unknown')}")
-
         result = await payment_service.process_webhook(event_json)
 
         if result.get("status") == "succeeded" and result.get("telegram_id"):
@@ -36,7 +34,7 @@ async def yukassa_webhook_handler(request: web.Request) -> web.Response:
                 try:
                     await bot.send_message(
                         chat_id=result["telegram_id"],
-                        text="🎉 <b>Оплата подтверждена!</b>\n⭐️ Premium активирован!",
+                        text="🎉 Premium активирован!",
                         parse_mode="HTML"
                     )
                 except Exception as e:
@@ -48,7 +46,6 @@ async def yukassa_webhook_handler(request: web.Request) -> web.Response:
         return web.Response(status=200, text="OK")
 
 
-# ─── Фоновые задачи ───
 async def periodic_tasks():
     while True:
         try:
@@ -58,7 +55,6 @@ async def periodic_tasks():
         await asyncio.sleep(3600)
 
 
-# ─── Startup ───
 async def on_startup(bot: Bot):
     logger.info("Initializing database...")
     await init_db()
@@ -71,8 +67,15 @@ async def on_startup(bot: Bot):
             drop_pending_updates=True,
             allowed_updates=["message", "callback_query"]
         )
+
+        # Проверяем что webhook установился
+        webhook_info = await bot.get_webhook_info()
+        logger.info(f"Webhook info: url={webhook_info.url}")
+        logger.info(f"Webhook pending: {webhook_info.pending_update_count}")
+        if webhook_info.last_error_message:
+            logger.error(f"Webhook last error: {webhook_info.last_error_message}")
     else:
-        logger.info("No WEBHOOK_HOST — skipping webhook setup")
+        logger.warning("No WEBHOOK_HOST set!")
 
     asyncio.create_task(periodic_tasks())
     logger.info("Bot started successfully!")
@@ -87,40 +90,53 @@ async def on_shutdown(bot: Bot):
 
 
 def create_bot_and_dp():
-    """Создаёт бот и диспетчер"""
     bot = Bot(
         token=config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Middleware
     from middlewares import RateLimitMiddleware
     dp.message.middleware(RateLimitMiddleware())
     dp.callback_query.middleware(RateLimitMiddleware())
 
-    # Роутеры
     from handlers import setup_routers
     main_router = setup_routers()
     dp.include_router(main_router)
 
-    # Events
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
     return bot, dp
 
 
-# ─── Production: Webhook (Railway) ───
 def create_app() -> web.Application:
     bot, dp = create_bot_and_dp()
 
     app = web.Application()
     app["bot"] = bot
 
-    # Telegram webhook
-    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    # ─── КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ───
+    # Webhook handler для Telegram
+    webhook_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
     webhook_handler.register(app, path=config.WEBHOOK_PATH)
+
+    # Добавляем логирование ВСЕХ входящих запросов
+    @web.middleware
+    async def log_middleware(request, handler):
+        logger.info(f"Incoming: {request.method} {request.path}")
+        try:
+            response = await handler(request)
+            logger.info(f"Response: {response.status}")
+            return response
+        except Exception as e:
+            logger.error(f"Handler error: {e}", exc_info=True)
+            raise
+
+    app.middlewares.append(log_middleware)
 
     # ЮKassa webhook
     app.router.add_post(config.PAYMENT_CALLBACK_PATH, yukassa_webhook_handler)
@@ -133,10 +149,10 @@ def create_app() -> web.Application:
     app.router.add_get("/", health)
 
     setup_application(app, dp, bot=bot)
+
     return app
 
 
-# ─── Dev: Polling ───
 async def run_polling():
     bot, dp = create_bot_and_dp()
     await init_db()
