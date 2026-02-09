@@ -1,4 +1,3 @@
-# handlers/__init__.py
 from aiogram import Router
 
 from .start import router as start_router
