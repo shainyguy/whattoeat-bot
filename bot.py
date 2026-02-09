@@ -2,9 +2,10 @@
 import asyncio
 import logging
 import sys
+import os
 
 from aiohttp import web
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -13,83 +14,150 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import config
 from database import init_db, UserDB
 
+# ─── Логирование ───
 logging.basicConfig(
-    level=logging.DEBUG,  # <── ИЗМЕНЕНО НА DEBUG
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
 
-async def yukassa_webhook_handler(request: web.Request) -> web.Response:
-    try:
-        from payment_service import payment_service
-        event_json = await request.json()
-        logger.info(f"YooKassa webhook: {event_json.get('event', 'unknown')}")
-        result = await payment_service.process_webhook(event_json)
-
-        if result.get("status") == "succeeded" and result.get("telegram_id"):
-            bot = request.app.get("bot")
-            if bot:
-                try:
-                    await bot.send_message(
-                        chat_id=result["telegram_id"],
-                        text="🎉 Premium активирован!",
-                        parse_mode="HTML"
-                    )
-                except Exception as e:
-                    logger.error(f"Notify error: {e}")
-
-        return web.Response(status=200, text="OK")
-    except Exception as e:
-        logger.error(f"YooKassa error: {e}")
-        return web.Response(status=200, text="OK")
-
-
-async def periodic_tasks():
-    while True:
-        try:
-            await UserDB.check_expired_premiums()
-        except Exception as e:
-            logger.error(f"Periodic task error: {e}")
-        await asyncio.sleep(3600)
-
-
 async def on_startup(bot: Bot):
+    logger.info("=== BOT STARTING ===")
+
+    # 1. Инициализация БД
     logger.info("Initializing database...")
     await init_db()
+    logger.info("Database OK")
 
-    if config.WEBHOOK_HOST:
-        webhook_url = config.webhook_url
-        logger.info(f"Setting webhook: {webhook_url}")
-        await bot.set_webhook(
-            url=webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"]
-        )
+    # 2. Определяем webhook URL
+    # Railway даёт домен через переменную или мы задаём вручную
+    host = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+    if not host:
+        host = os.getenv("WEBHOOK_HOST", "")
 
-        # Проверяем что webhook установился
-        webhook_info = await bot.get_webhook_info()
-        logger.info(f"Webhook info: url={webhook_info.url}")
-        logger.info(f"Webhook pending: {webhook_info.pending_update_count}")
-        if webhook_info.last_error_message:
-            logger.error(f"Webhook last error: {webhook_info.last_error_message}")
+    if not host:
+        logger.error("!!! WEBHOOK_HOST is EMPTY! Bot won't receive updates!")
+        logger.error("Set RAILWAY_PUBLIC_DOMAIN or WEBHOOK_HOST in Railway variables")
+        return
+
+    webhook_url = f"https://{host}/webhook"
+    logger.info(f"Setting webhook to: {webhook_url}")
+
+    # 3. Удаляем старый webhook и ставим новый
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(
+        url=webhook_url,
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=True
+    )
+
+    # 4. Проверяем
+    info = await bot.get_webhook_info()
+    logger.info(f"Webhook URL: {info.url}")
+    logger.info(f"Webhook pending updates: {info.pending_update_count}")
+    logger.info(f"Webhook max connections: {info.max_connections}")
+    if info.last_error_message:
+        logger.error(f"Webhook LAST ERROR: {info.last_error_message}")
+        logger.error(f"Webhook error date: {info.last_error_date}")
     else:
-        logger.warning("No WEBHOOK_HOST set!")
+        logger.info("Webhook: no errors")
 
-    asyncio.create_task(periodic_tasks())
-    logger.info("Bot started successfully!")
+    logger.info("=== BOT STARTED OK ===")
 
 
 async def on_shutdown(bot: Bot):
-    logger.info("Shutting down...")
-    try:
-        await bot.delete_webhook()
-    except Exception:
-        pass
+    logger.info("Shutting down, removing webhook...")
+    await bot.delete_webhook()
 
 
-def create_bot_and_dp():
+def create_app() -> web.Application:
+    """Главная функция — создаёт приложение"""
+
+    # ─── Бот ───
+    bot = Bot(
+        token=config.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
+
+    # ─── Диспетчер ───
+    dp = Dispatcher(storage=MemoryStorage())
+
+    # ─── Middleware ───
+    from middlewares import RateLimitMiddleware
+    dp.message.middleware(RateLimitMiddleware())
+    dp.callback_query.middleware(RateLimitMiddleware())
+
+    # ─── Роутеры ───
+    from handlers import setup_routers
+    dp.include_router(setup_routers())
+
+    # ─── Events ───
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    # ─── Web App ───
+    app = web.Application()
+    app["bot"] = bot
+
+    # Логируем каждый входящий запрос
+    @web.middleware
+    async def request_logger(request, handler):
+        logger.info(f">>> {request.method} {request.path} from {request.remote}")
+        response = await handler(request)
+        logger.info(f"<<< {response.status}")
+        return response
+
+    app.middlewares.append(request_logger)
+
+    # ─── Telegram webhook ───
+    SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    ).register(app, path="/webhook")
+
+    # ─── Health check ───
+    async def health(request):
+        return web.Response(text="OK")
+
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    # ─── Тестовый эндпоинт ───
+    async def test_webhook(request):
+        return web.Response(text="Webhook endpoint is alive")
+
+    app.router.add_get("/webhook", test_webhook)
+
+    # ─── ЮKassa ───
+    async def yukassa_handler(request):
+        try:
+            from payment_service import payment_service
+            data = await request.json()
+            result = await payment_service.process_webhook(data)
+            if result.get("status") == "succeeded" and result.get("telegram_id"):
+                try:
+                    await bot.send_message(
+                        result["telegram_id"],
+                        "🎉 Premium активирован!"
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"YooKassa error: {e}")
+        return web.Response(status=200)
+
+    app.router.add_post("/payment/callback", yukassa_handler)
+
+    # ─── Интеграция aiogram с aiohttp ───
+    setup_application(app, dp, bot=bot)
+
+    return app
+
+
+# ─── Polling для локальной разработки ───
+async def run_polling():
     bot = Bot(
         token=config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -101,73 +169,24 @@ def create_bot_and_dp():
     dp.callback_query.middleware(RateLimitMiddleware())
 
     from handlers import setup_routers
-    main_router = setup_routers()
-    dp.include_router(main_router)
+    dp.include_router(setup_routers())
 
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-
-    return bot, dp
-
-
-def create_app() -> web.Application:
-    bot, dp = create_bot_and_dp()
-
-    app = web.Application()
-    app["bot"] = bot
-
-    # ─── КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ───
-    # Webhook handler для Telegram
-    webhook_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-    webhook_handler.register(app, path=config.WEBHOOK_PATH)
-
-    # Добавляем логирование ВСЕХ входящих запросов
-    @web.middleware
-    async def log_middleware(request, handler):
-        logger.info(f"Incoming: {request.method} {request.path}")
-        try:
-            response = await handler(request)
-            logger.info(f"Response: {response.status}")
-            return response
-        except Exception as e:
-            logger.error(f"Handler error: {e}", exc_info=True)
-            raise
-
-    app.middlewares.append(log_middleware)
-
-    # ЮKassa webhook
-    app.router.add_post(config.PAYMENT_CALLBACK_PATH, yukassa_webhook_handler)
-
-    # Health check
-    async def health(request):
-        return web.Response(text="OK")
-
-    app.router.add_get("/health", health)
-    app.router.add_get("/", health)
-
-    setup_application(app, dp, bot=bot)
-
-    return app
-
-
-async def run_polling():
-    bot, dp = create_bot_and_dp()
     await init_db()
-    logger.info("Starting polling...")
-    asyncio.create_task(periodic_tasks())
+
+    # Удаляем webhook для polling
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    logger.info("Starting polling mode...")
     await dp.start_polling(bot, drop_pending_updates=True)
 
 
+# ─── Точка входа ───
 if __name__ == "__main__":
     if "--polling" in sys.argv:
         asyncio.run(run_polling())
     else:
+        # Railway production
+        port = int(os.getenv("PORT", 8080))
+        logger.info(f"Starting web server on port {port}")
         app = create_app()
-        web.run_app(
-            app,
-            host=config.WEBAPP_HOST,
-            port=config.WEBAPP_PORT
-        )
+        web.run_app(app, host="0.0.0.0", port=port)
