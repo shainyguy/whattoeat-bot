@@ -1,4 +1,13 @@
-# handlers/start.py (обновлённый WELCOME_TEXT)
+from aiogram import Router, F
+from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, CallbackQuery
+
+from database import UserDB
+from keyboards import main_menu_keyboard, diet_keyboard
+from models import User
+
+# ВОТ ЭТА СТРОКА ОБЯЗАТЕЛЬНА В КАЖДОМ ФАЙЛЕ ХЭНДЛЕРА
+router = Router()
 
 WELCOME_TEXT = """
 🍽️ <b>Добро пожаловать в WhatToEat!</b>
@@ -25,3 +34,51 @@ WELCOME_TEXT = """
 
 Жми <b>«🍳 Что приготовить?»</b> и начинай!
 """
+
+HELP_TEXT = """
+📖 <b>Справка по WhatToEat</b>
+
+<b>Команды:</b>
+/start — Перезапуск бота
+/help — Эта справка
+/profile — Настройки профиля
+/premium — Информация о подписке
+
+<b>Как отправить продукты:</b>
+📝 Текстом: «курица, картошка, лук, сметана»
+🎤 Голосовым: зажми микрофон и перечисли
+📸 Фото: сфоткай содержимое холодильника
+
+<b>Free:</b> 3 рецепта в день
+<b>Premium (490₽/мес):</b> безлимит + план питания + учёт диет
+"""
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, db_user: User):
+    await message.answer(
+        WELCOME_TEXT,
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard()
+    )
+
+    if not db_user.diet_type:
+        await message.answer(
+            "🎯 Для лучших рекомендаций настрой профиль!\n"
+            "Какой тип питания тебе подходит?",
+            reply_markup=diet_keyboard()
+        )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message, db_user: User):
+    await message.answer(HELP_TEXT, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery, db_user: User):
+    await callback.message.answer(
+        "🏠 Главное меню",
+        reply_markup=main_menu_keyboard()
+    )
+    await callback.answer()
