@@ -331,6 +331,34 @@ class GigaChatService:
             recipes = [recipes]
         return recipes if isinstance(recipes, list) else []
 
+    async def get_shopping_list(self, recipe_title: str, all_ingredients: list[dict],
+                                available_products: list[str]) -> list[dict]:
+        """Генерация списка покупок"""
+        # Форматируем ингредиенты подробно
+        ing_text = ""
+        for ing in all_ingredients:
+            if isinstance(ing, dict):
+                name = ing.get("name", "")
+                amount = ing.get("amount", "")
+                have = "✅ есть" if ing.get("have", False) else "❌ нет"
+                ing_text += f"- {name} ({amount}) — {have}\n"
+            else:
+                ing_text += f"- {ing}\n"
+
+        prompt = SHOPPING_LIST_PROMPT.format(
+            recipe_title=recipe_title,
+            all_ingredients=ing_text,
+            available_products=", ".join(available_products) if available_products else "ничего"
+        )
+
+        messages = [{"role": "user", "content": prompt}]
+        response = await self._request(messages, temperature=0.3)
+        result = self._extract_json(response)
+
+        if isinstance(result, list):
+            return result
+        return []
+
     async def get_shopping_list_with_prices(self, missing_items: list[dict]) -> list[dict]:
         """
         Оценка цен для списка покупок.
@@ -386,7 +414,7 @@ class GigaChatService:
             }
             for m in missing_items
         ]
-
+  
     async def generate_meal_plan(self, calories_goal: int = 2000,
                                   diet_type: str = None,
                                   allergies: list[str] = None,
@@ -403,4 +431,3 @@ class GigaChatService:
 
 
 gigachat = GigaChatService()
-
