@@ -354,47 +354,11 @@ class GigaChatService:
         messages = [{"role": "user", "content": prompt}]
         response = await self._request(messages, temperature=0.3)
         result = self._extract_json(response)
-        return result if isinstance(result, list) else []
 
-    async def get_shopping_list_with_prices(self, missing_items: list[dict]) -> list[dict]:
-        """Оценка цен для списка покупок"""
-        items_text = ""
-        for item in missing_items:
-            items_text += f"- {item['name']} ({item.get('amount', '')})\n"
+        if isinstance(result, list):
+            return result
+        return []
 
-        prompt = f"""Оцени стоимость продуктов в российских магазинах (2024-2025).
-
-Продукты:
-{items_text}
-
-Верни JSON:
-[
-  {{"name": "название", "amount": "количество", "estimated_price": цена_рублей, "where_to_buy": "отдел"}}
-]
-
-Цены реалистичные для супермаркета. ТОЛЬКО JSON."""
-
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            response = await self._request(messages, temperature=0.3, max_tokens=2000)
-            result = self._extract_json(response)
-
-            if isinstance(result, list) and len(result) > 0:
-                for i, item in enumerate(result):
-                    if i < len(missing_items):
-                        if not item.get("name"):
-                            item["name"] = missing_items[i]["name"]
-                        if not item.get("amount"):
-                            item["amount"] = missing_items[i].get("amount", "")
-                return result
-        except Exception as e:
-            logger.error(f"Price estimation error: {e}")
-
-        return [
-            {"name": m["name"], "amount": m.get("amount", ""), "estimated_price": 0, "where_to_buy": ""}
-            for m in missing_items
-        ]
-  
     async def generate_meal_plan(self, calories_goal: int = 2000,
                                   diet_type: str = None,
                                   allergies: list[str] = None,
@@ -411,4 +375,3 @@ class GigaChatService:
 
 
 gigachat = GigaChatService()
-
