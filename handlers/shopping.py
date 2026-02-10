@@ -1,3 +1,4 @@
+# handlers/shopping.py
 import logging
 
 from aiogram import Router, F
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.callback_query(F.data.startswith("shopping_"))
-async def generate_shopping_list(callback: CallbackQuery, state: FSMContext, db_user: User):
+async def shopping_list(callback: CallbackQuery, state: FSMContext, db_user: User):
     data = await state.get_data()
     recipes = data.get("recipes", [])
     products = data.get("products", [])
@@ -24,54 +25,77 @@ async def generate_shopping_list(callback: CallbackQuery, state: FSMContext, db_
 
     recipe = recipes[idx]
     ingredients = recipe.get("ingredients", [])
-    missing = [ing for ing in ingredients if not ing.get("have", True)]
 
+    # Проверяем есть ли недостающие
+    missing = [i for i in ingredients if not i.get("have", True)]
     if not missing:
-        await callback.answer("✅ Все продукты уже есть!", show_alert=True)
+        await callback.answer("✅ Всё есть!", show_alert=True)
         return
 
-    await callback.message.answer("🛒 Формирую список покупок...")
+    processing = await callback.message.answer("🛒 Составляю список покупок...")
 
     try:
-        all_names = [ing.get("name", "") for ing in ingredients]
         shopping = await gigachat.get_shopping_list(
             recipe_title=recipe.get("title", ""),
-            all_ingredients=all_names,
+            all_ingredients=ingredients,  # Передаём полные dict'ы
             available_products=products
         )
-    except Exception:
+    except Exception as e:
+        logger.error(f"Shopping list error: {e}")
+        # Фоллбэк — делаем список из данных рецепта
+        shopping = []
+        for ing in missing:
+            shopping.append({
+                "name": ing.get("name", ""),
+                "amount": ing.get("amount", ""),
+                "estimated_price": 0,
+                "where_to_buy": ""
+            })
+
+    if not shopping:
+        # Ещё один фоллбэк
         shopping = [
-            {"name": ing.get("name", ""), "amount": ing.get("amount", ""), "estimated_price": 0}
-            for ing in missing
+            {"name": i.get("name", ""), "amount": i.get("amount", ""), "estimated_price": 0}
+            for i in missing
         ]
 
-    text = f"🛒 <b>Список покупок для «{recipe.get('title', '')}»:</b>\n\n"
-    total_cost = 0
+    # Форматируем
+    title = recipe.get("title", "Рецепт")
+    text = f"🛒 <b>Список покупок для «{title}»:</b>\n\n"
 
+    total = 0
     for i, item in enumerate(shopping, 1):
         name = item.get("name", "?")
         amount = item.get("amount", "")
-        price = item.get("estimated_price", 0)
-        total_cost += price
-        text += f"{i}. {name} — {amount}"
+        price = item.get("estimated_price", 0) or 0
+        where = item.get("where_to_buy", "")
+        total += price
+
+        text += f"<b>{i}.</b> {name}"
+        if amount:
+            text += f" — {amount}"
         if price:
             text += f" (~{price} ₽)"
+        if where:
+            text += f" 📍 {where}"
         text += "\n"
 
-    if total_cost:
-        text += f"\n💰 <b>Итого: ~{total_cost} ₽</b>"
-    text += "\n\n💡 Цены приблизительные"
+    text += "\n"
+    if total:
+        text += f"💰 <b>Итого: ~{total} ₽</b>\n"
+    text += "\n💡 <i>Цены приблизительные (средние по рынку)</i>"
 
-    await callback.message.answer(text, parse_mode="HTML")
+    await processing.edit_text(text, parse_mode="HTML")
     await callback.answer()
 
 
 @router.message(F.text == "🛒 Список покупок")
-async def shopping_list_menu(message: Message, db_user: User):
+async def shopping_menu(message: Message, db_user: User):
     await message.answer(
         "🛒 <b>Список покупок</b>\n\n"
         "Чтобы получить список:\n"
-        "1. Найди рецепт через «🍳 Что приготовить?»\n"
-        "2. Нажми «🛒 Список покупок» под рецептом",
+        "1. Найди рецепт → «🍳 Что приготовить?»\n"
+        "2. Нажми «🛒 Список покупок» под рецептом\n\n"
+        "Я определю что нужно докупить и посчитаю стоимость!",
         parse_mode="HTML"
     )
