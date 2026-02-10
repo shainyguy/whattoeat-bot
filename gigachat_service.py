@@ -331,33 +331,61 @@ class GigaChatService:
             recipes = [recipes]
         return recipes if isinstance(recipes, list) else []
 
-    async def get_shopping_list(self, recipe_title: str, all_ingredients: list[dict],
-                                available_products: list[str]) -> list[dict]:
-        """Генерация списка покупок"""
-        # Форматируем ингредиенты подробно
-        ing_text = ""
-        for ing in all_ingredients:
-            if isinstance(ing, dict):
-                name = ing.get("name", "")
-                amount = ing.get("amount", "")
-                have = "✅ есть" if ing.get("have", False) else "❌ нет"
-                ing_text += f"- {name} ({amount}) — {have}\n"
-            else:
-                ing_text += f"- {ing}\n"
+    async def get_shopping_list_with_prices(self, missing_items: list[dict]) -> list[dict]:
+        """
+        Оценка цен для списка покупок.
+        missing_items: [{"name": "...", "amount": "...", "substitute": "..."}]
+        """
+        items_text = ""
+        for item in missing_items:
+            items_text += f"- {item['name']} ({item.get('amount', '')})\n"
 
-        prompt = SHOPPING_LIST_PROMPT.format(
-            recipe_title=recipe_title,
-            all_ingredients=ing_text,
-            available_products=", ".join(available_products) if available_products else "ничего"
-        )
+        prompt = f"""Оцени стоимость продуктов в российских магазинах (2024-2025).
 
-        messages = [{"role": "user", "content": prompt}]
-        response = await self._request(messages, temperature=0.3)
-        result = self._extract_json(response)
+Продукты для покупки:
+{items_text}
 
-        if isinstance(result, list):
-            return result
-        return []
+Для каждого продукта верни JSON:
+[
+  {{
+    "name": "название",
+    "amount": "количество",
+    "estimated_price": цена_в_рублях,
+    "where_to_buy": "отдел магазина"
+  }}
+]
+
+Цены должны быть реалистичными для обычного супермаркета.
+Верни ТОЛЬКО JSON."""
+
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response = await self._request(messages, temperature=0.3, max_tokens=2000)
+            result = self._extract_json(response)
+
+            if isinstance(result, list) and len(result) > 0:
+                # Совмещаем с исходными данными
+                for i, item in enumerate(result):
+                    if i < len(missing_items):
+                        if not item.get("name"):
+                            item["name"] = missing_items[i]["name"]
+                        if not item.get("amount"):
+                            item["amount"] = missing_items[i].get("amount", "")
+                return result
+
+        except Exception as e:
+            logger.error(f"Price estimation error: {e}")
+
+        # Фоллбэк
+        return [
+            {
+                "name": m["name"],
+                "amount": m.get("amount", ""),
+                "estimated_price": 0,
+                "where_to_buy": ""
+            }
+            for m in missing_items
+        ]
 
     async def generate_meal_plan(self, calories_goal: int = 2000,
                                   diet_type: str = None,
@@ -375,3 +403,4 @@ class GigaChatService:
 
 
 gigachat = GigaChatService()
+
