@@ -354,37 +354,25 @@ class GigaChatService:
         messages = [{"role": "user", "content": prompt}]
         response = await self._request(messages, temperature=0.3)
         result = self._extract_json(response)
-
-        if isinstance(result, list):
-            return result
-        return []
+        return result if isinstance(result, list) else []
 
     async def get_shopping_list_with_prices(self, missing_items: list[dict]) -> list[dict]:
-        """
-        Оценка цен для списка покупок.
-        missing_items: [{"name": "...", "amount": "...", "substitute": "..."}]
-        """
+        """Оценка цен для списка покупок"""
         items_text = ""
         for item in missing_items:
             items_text += f"- {item['name']} ({item.get('amount', '')})\n"
 
         prompt = f"""Оцени стоимость продуктов в российских магазинах (2024-2025).
 
-Продукты для покупки:
+Продукты:
 {items_text}
 
-Для каждого продукта верни JSON:
+Верни JSON:
 [
-  {{
-    "name": "название",
-    "amount": "количество",
-    "estimated_price": цена_в_рублях,
-    "where_to_buy": "отдел магазина"
-  }}
+  {{"name": "название", "amount": "количество", "estimated_price": цена_рублей, "where_to_buy": "отдел"}}
 ]
 
-Цены должны быть реалистичными для обычного супермаркета.
-Верни ТОЛЬКО JSON."""
+Цены реалистичные для супермаркета. ТОЛЬКО JSON."""
 
         try:
             messages = [{"role": "user", "content": prompt}]
@@ -392,7 +380,6 @@ class GigaChatService:
             result = self._extract_json(response)
 
             if isinstance(result, list) and len(result) > 0:
-                # Совмещаем с исходными данными
                 for i, item in enumerate(result):
                     if i < len(missing_items):
                         if not item.get("name"):
@@ -400,18 +387,11 @@ class GigaChatService:
                         if not item.get("amount"):
                             item["amount"] = missing_items[i].get("amount", "")
                 return result
-
         except Exception as e:
             logger.error(f"Price estimation error: {e}")
 
-        # Фоллбэк
         return [
-            {
-                "name": m["name"],
-                "amount": m.get("amount", ""),
-                "estimated_price": 0,
-                "where_to_buy": ""
-            }
+            {"name": m["name"], "amount": m.get("amount", ""), "estimated_price": 0, "where_to_buy": ""}
             for m in missing_items
         ]
   
@@ -431,3 +411,4 @@ class GigaChatService:
 
 
 gigachat = GigaChatService()
+
